@@ -261,6 +261,53 @@ const NAV = [
   {id:'config',ic:'⚙',txt:'Configuración',roles:['admin']}
 ];
 
+/* ============================================================
+   SINCRONIZACIÓN con backend Apps Script
+   Pega aquí la MISMA URL /exec que pusiste en la app del cobrador.
+   En blanco = modo local (lee localStorage compartido).        */
+const API_URL = '';
+
+const Net = {
+  conectado(){ return API_URL.indexOf('http')===0; },
+  async pull(){
+    if(!this.conectado()) return false;
+    const d = await jsonp(API_URL+'?action=pull');
+    if(!d || !d.ok) return false;
+    if(d.usuarios && d.usuarios.length) DB.data.usuarios = d.usuarios;
+    if(d.clientes && d.clientes.length) DB.data.clientes = d.clientes;
+    if(d.pagos){
+      const pendLocal = DB.data.pagos.filter(p=>p.estatus==='pendiente');
+      const enSrv = new Set(d.pagos.map(p=>p.folio));
+      DB.data.pagos = [...pendLocal.filter(p=>!enSrv.has(p.folio)), ...d.pagos]
+        .sort((a,b)=> (Number(b.creadoEn)||0)-(Number(a.creadoEn)||0));
+    }
+    DB.save();
+    return true;
+  },
+  async post(payload){
+    if(!this.conectado()) return;
+    await fetch(API_URL, {method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload)});
+  },
+  async firma(folio){
+    if(!this.conectado()) return '';
+    const d = await jsonp(API_URL+'?action=firma&folio='+encodeURIComponent(folio));
+    return (d && d.firma) || '';
+  }
+};
+function jsonp(url){
+  return new Promise((resolve,reject)=>{
+    const cb='__adm_cb'+Date.now();
+    const s=document.createElement('script');
+    const to=setTimeout(()=>{cleanup();reject(new Error('timeout'))},12000);
+    function cleanup(){clearTimeout(to);delete window[cb];s.remove();}
+    window[cb]=d=>{cleanup();resolve(d);};
+    s.onerror=()=>{cleanup();reject(new Error('jsonp'))};
+    s.src=url+(url.indexOf('?')<0?'?':'&')+'callback='+cb;
+    document.body.appendChild(s);
+  });
+}
+
 const Admin = {
   user:null, section:'dashboard', reporteActual:'diaria',
   filtros:{estatus:'todos',cobrador:'todos',periodo:'todos',q:''},
@@ -298,6 +345,18 @@ const Admin = {
     this.renderNav();
     const first=NAV.find(n=>n.roles.includes(this.user.rol)).id;
     this.go(first);
+    this.startPolling();
+  },
+  /* Descarga periódica del servidor (polling) y refresco de la vista */
+  async startPolling(){
+    await this.pullAndRefresh();
+    clearInterval(this._poll);
+    this._poll = setInterval(()=>this.pullAndRefresh(), 45000);
+  },
+  async pullAndRefresh(){
+    if(!Net.conectado()) return;
+    if(document.getElementById('modalRoot').innerHTML) return; /* no interrumpir un modal abierto */
+    try{ if(await Net.pull()) this.go(this.section); }catch(e){}
   },
   renderNav(){
     document.getElementById('nav').innerHTML=NAV.filter(n=>n.roles.includes(this.user.rol))
@@ -449,22 +508,32 @@ const Admin = {
       <div class="kv"><span>Cobrador</span><b>${p.cobradorNombre}</b></div>
       <div class="kv"><span>Ubicación GPS</span><b>${gps}</b></div>
       <div class="kv"><span>Observaciones</span><b>${p.observaciones||'—'}</b></div>
-      <div class="kv"><span>Firma</span><b>${p.firma?`<img src="${p.firma}" style="height:46px">`:'No registrada'}</b></div>
+      <div class="kv"><span>Firma</span><b>${p.firma?`<img src="${p.firma}" style="height:46px">`:(Net.conectado()?`<span id="firmaSlot" data-folio="${p.folio}"><button class="btn ghost tiny" onclick="Admin.verFirma('${p.folio}')">Ver firma</button></span>`:'No registrada')}</b></div>
       ${this.esCajaOAdmin()&&(p.estatus==='pendiente'||p.estatus==='sincronizado')?
         `<div class="row" style="margin-top:16px">
           <button class="btn green" onclick="Admin.validar('${p.folio}',true)">✓ Validar pago</button>
           <button class="btn ghost" style="color:var(--rojo);border-color:#f0caca" onclick="Admin.rechazar('${p.folio}')">Rechazar</button>
         </div>`:''}`);
   },
+  async verFirma(folio){
+    const slot=document.getElementById('firmaSlot'); if(slot) slot.textContent='…';
+    try{ const f=await Net.firma(folio);
+      if(slot) slot.innerHTML = f?`<img src="${f}" style="height:46px">`:'No registrada';
+    }catch(e){ if(slot) slot.textContent='No disponible'; }
+  },
   validar(folio,cerrar){
     const p=DB.data.pagos.find(x=>x.folio===folio);
     p.estatus='validado';p.validadoPor=this.user.nombre;p.validadoEn=new Date().toISOString();
-    DB.save();this.bitacora('Validó pago '+folio);this.toast('Pago validado');
+    DB.save();
+    Net.post({action:'validarPago',folio,estatus:'validado',validadoPor:this.user.nombre});
+    this.bitacora('Validó pago '+folio);this.toast('Pago validado');
     if(cerrar)this.closeModal();this.renderPagosTable();
   },
   rechazar(folio){
     const p=DB.data.pagos.find(x=>x.folio===folio);
-    p.estatus='rechazado';DB.save();this.bitacora('Rechazó pago '+folio);
+    p.estatus='rechazado';DB.save();
+    Net.post({action:'validarPago',folio,estatus:'rechazado',validadoPor:this.user.nombre});
+    this.bitacora('Rechazó pago '+folio);
     this.toast('Pago rechazado');this.closeModal();this.renderPagosTable();
   },
 
