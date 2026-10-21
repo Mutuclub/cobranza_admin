@@ -76,7 +76,7 @@
   .btn.tiny{min-height:30px;padding:4px 10px;font-size:12.5px;font-weight:600;border-radius:8px}
   .btn[disabled]{opacity:.45;cursor:not-allowed}
 
-  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:999px}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap}
   .pill.pend{background:var(--ambar-soft);color:#8a5d0f}
   .pill.sync{background:var(--azulinfo-soft);color:#1d4f86}
   .pill.valid{background:var(--verde-soft);color:#10684c}
@@ -624,6 +624,7 @@ const DB = {
     try{const r=localStorage.getItem(this.KEY);this.data=r?JSON.parse(LZString.decompressFromUTF16(r)):null}catch(e){this.data=null}
     if(!this.data) this.data=this._seed();
     if(!this.data.empresa) this.data.empresa={};
+    if(!this.data.bloques) this.data.bloques=[];
     return this.data;
   },
   save(){localStorage.setItem(this.KEY,LZString.compressToUTF16(JSON.stringify(this.data)))},
@@ -657,17 +658,19 @@ const DB = {
         {folio:'C02-2026-00003',clienteId:'c3',clienteNombre:'Laura Martínez Díaz',poliza:'POL-2024-1455',fecha:iso(4),importe:780,metodo:'Transferencia',observaciones:'',proxVenc:iso(-30).slice(0,10),firma:null,lat:20.7050,lng:-103.3920,cobradorId:'u_cob2',cobradorNombre:'Ana Torres',estatus:'validado',creadoEn:Date.now()-6000},
         {folio:'C01-2026-00004',clienteId:'c2',clienteNombre:'Roberto Sánchez Mora',poliza:'POL-2023-0942',fecha:iso(5),importe:1200,metodo:'Efectivo',observaciones:'',proxVenc:iso(-26).slice(0,10),firma:null,lat:20.6770,lng:-103.3470,cobradorId:'u_cob',cobradorNombre:'Juan Pérez',estatus:'validado',creadoEn:Date.now()-7000}
       ],
-      bitacora:[], meta:{folioSeq:{C01:4,C02:3}}
+      bitacora:[], bloques:[], meta:{folioSeq:{C01:4,C02:3}}
     };
   }
 };
 
 /* ---------- Catálogos ---------- */
-const ESTATUS = {pendiente:{cls:'pend',txt:'Pendiente'},sincronizado:{cls:'sync',txt:'Sincronizado'},validado:{cls:'valid',txt:'Validado'},rechazado:{cls:'rech',txt:'Rechazado'}};
+const ESTATUS = {pendiente:{cls:'pend',txt:'Pendiente'},sincronizado:{cls:'sync',txt:'Sincronizado'},validado:{cls:'valid',txt:'Validado'},rechazado:{cls:'rech',txt:'Rechazado'},conflicto:{cls:'pend',txt:'Revisar'}};
+const SERIES = {MA:{nombre:'Mutuclub / Arca',pref:''}, J:{nombre:'Juda',pref:'J'}};
 const NAV = [
   {id:'dashboard',ic:'▦',txt:'Dashboard',roles:['admin','supervisor','caja','gerencia']},
   {id:'pagos',ic:'₡',txt:'Pagos',roles:['admin','supervisor','caja']},
   {id:'cobradores',ic:'⛢',txt:'Cobradores',roles:['admin','supervisor','gerencia']},
+  {id:'recibos',ic:'№',txt:'Dotación de recibos',roles:['admin','supervisor','caja']},
   {id:'clientes',ic:'☰',txt:'Clientes',roles:['admin','supervisor','caja']},
   {id:'reportes',ic:'▤',txt:'Reportes',roles:['admin','supervisor','caja','gerencia']},
   {id:'config',ic:'⚙',txt:'Configuración',roles:['admin']}
@@ -687,6 +690,7 @@ const Net = {
     if(!d || !d.ok) return false;
     if(d.usuarios && d.usuarios.length) DB.data.usuarios = d.usuarios;
     if(d.clientes && d.clientes.length) DB.data.clientes = d.clientes;
+    if(d.bloques) DB.data.bloques = d.bloques;
     if(d.pagos){
       const pendLocal = DB.data.pagos.filter(p=>p.estatus==='pendiente');
       const enSrv = new Set(d.pagos.map(p=>p.folio));
@@ -700,6 +704,11 @@ const Net = {
     if(!this.conectado()) return;
     await fetch(API_URL, {method:'POST', mode:'no-cors',
       headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload)});
+  },
+  /* Acción con respuesta (JSONP): el servidor valida y contesta */
+  async get(action, params){
+    const qs = Object.entries(params||{}).map(([k,v])=>k+'='+encodeURIComponent(v==null?'':v)).join('&');
+    return await jsonp(API_URL+'?action='+action+(qs?'&'+qs:''));
   },
   async firma(folio){
     if(!this.conectado()) return '';
@@ -781,8 +790,8 @@ const Admin = {
     document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.s===sec));
     document.getElementById('pageActions').innerHTML='';
     this.toggleMenu(false);
-    ({dashboard:'_dashboard',pagos:'_pagos',cobradores:'_cobradores',clientes:'_clientes',reportes:'_reportes',config:'_config'})[sec]
-      && this['render'+({dashboard:'Dashboard',pagos:'Pagos',cobradores:'Cobradores',clientes:'Clientes',reportes:'Reportes',config:'Config'})[sec]]();
+    const R={dashboard:'Dashboard',pagos:'Pagos',cobradores:'Cobradores',recibos:'Recibos',clientes:'Clientes',reportes:'Reportes',config:'Config'}[sec];
+    if(R) this['render'+R]();
   },
   head(title,sub){document.getElementById('pageTitle').textContent=title;document.getElementById('pageSub').textContent=sub||'';},
 
@@ -790,9 +799,9 @@ const Admin = {
   renderDashboard(){
     this.head('Dashboard','Resumen operativo en tiempo real');
     const pg=DB.data.pagos;
-    const hoy=pg.filter(p=>U.esHoy(p.fecha)&&p.estatus!=='rechazado');
-    const sem=pg.filter(p=>U.diasAtras(p.fecha,6)&&p.estatus!=='rechazado');
-    const porValidar=pg.filter(p=>p.estatus==='pendiente'||p.estatus==='sincronizado');
+    const hoy=pg.filter(p=>U.esHoy(p.fecha)&&p.estatus!=='rechazado'&&p.tipo!=='cancelado');
+    const sem=pg.filter(p=>U.diasAtras(p.fecha,6)&&p.estatus!=='rechazado'&&p.tipo!=='cancelado');
+    const porValidar=pg.filter(p=>this.porValidar(p));
     const totalRec=pg.filter(p=>p.estatus!=='rechazado').reduce((s,p)=>s+p.importe,0);
     const morosos=DB.data.clientes.filter(c=>c.estatus==='moroso'||this.vencido(c)).length;
     const sum=a=>a.reduce((s,p)=>s+p.importe,0);
@@ -850,7 +859,8 @@ const Admin = {
   /* ============ PAGOS (validación) ============ */
   renderPagos(){
     this.head('Pagos','Validación y seguimiento de cobranza');
-    document.getElementById('pageActions').innerHTML=`<button class="btn ghost sm" onclick="Admin.exportCSV('pagos')">⬇ Excel</button>`;
+    document.getElementById('pageActions').innerHTML=`<button class="btn ghost sm" onclick="Admin.exportCSV('pagos')">⬇ Excel</button>
+      ${this.esCajaOAdmin()?`<button class="btn ghost sm" onclick="Admin.exportAccess()" title="Pagos validados que aún no pasan a Access, con las columnas de BD Pagos">⬇ Respaldo Access</button>`:''}`;
     this.renderPagosTable();
   },
   pagosFiltrados(){
@@ -860,7 +870,7 @@ const Admin = {
       if(f.cobrador!=='todos'&&p.cobradorId!==f.cobrador)return false;
       if(f.periodo==='hoy'&&!U.esHoy(p.fecha))return false;
       if(f.periodo==='semana'&&!U.diasAtras(p.fecha,6))return false;
-      if(f.q){const q=f.q.toLowerCase();if(!(p.clienteNombre+p.folio+p.poliza).toLowerCase().includes(q))return false;}
+      if(f.q){const q=f.q.toLowerCase();if(!(p.clienteNombre+p.folio+p.poliza+(p.recibo||'')).toLowerCase().includes(q))return false;}
       return true;
     });
   },
@@ -871,7 +881,7 @@ const Admin = {
     const puedeValidar=this.esCajaOAdmin();
     document.getElementById('view').innerHTML=`
       <div class="toolbar">
-        <input class="search" placeholder="Buscar cliente, folio o póliza" value="${U.esc(f.q)}" oninput="Admin.setFiltro('q',this.value)">
+        <input class="search" placeholder="Buscar cliente, recibo, folio o póliza" value="${U.esc(f.q)}" oninput="Admin.setFiltro('q',this.value)">
         <select onchange="Admin.setFiltro('estatus',this.value)">
           <option value="todos">Todos los estatus</option>
           ${Object.entries(ESTATUS).map(([k,v])=>`<option value="${k}" ${f.estatus===k?'selected':''}>${v.txt}</option>`).join('')}
@@ -886,10 +896,10 @@ const Admin = {
       </div>
       <div class="card tablewrap">
         <table><thead><tr>
-          <th>Folio</th><th>Cliente</th><th>Cobrador</th><th>Fecha</th><th>Método</th><th class="num">Importe</th><th>Estatus</th><th></th>
+          <th>Recibo</th><th>Cliente</th><th>Cobrador</th><th>Fecha</th><th>Método</th><th class="num">Importe</th><th>Estatus</th><th></th>
         </tr></thead><tbody>
-        ${rows.length?rows.map(p=>{const e=ESTATUS[p.estatus];return `<tr>
-          <td style="font-family:monospace;font-size:12.5px">${p.folio}</td>
+        ${rows.length?rows.map(p=>{const e=ESTATUS[p.estatus]||ESTATUS.pendiente;return `<tr>
+          <td style="font-family:monospace;font-size:12.5px">${this.reciboCelda(p)}</td>
           <td>${p.clienteNombre}</td>
           <td>${p.cobradorNombre}</td>
           <td style="white-space:nowrap">${U.fh(p.fecha)}</td>
@@ -898,7 +908,7 @@ const Admin = {
           <td><span class="pill ${e.cls} dot">${e.txt}</span></td>
           <td style="white-space:nowrap;text-align:right">
             <button class="btn ghost tiny" onclick="Admin.verPago('${p.folio}')">Ver</button>
-            ${puedeValidar&&(p.estatus==='pendiente'||p.estatus==='sincronizado')?
+            ${puedeValidar&&this.porValidar(p)?
               `<button class="btn green tiny" onclick="Admin.validar('${p.folio}')">Validar</button>`:''}
           </td></tr>`}).join(''):'<tr><td colspan="8"><div class="empty">No hay pagos con estos filtros.</div></td></tr>'}
         </tbody></table>
@@ -907,11 +917,15 @@ const Admin = {
   },
   setFiltro(k,v){this.filtros[k]=v;if(this.section==='pagos'){this.renderPagosTable();if(k==='q'){const s=document.querySelector('.toolbar .search');if(s){s.focus();s.setSelectionRange(s.value.length,s.value.length);}}}},
   verPago(folio){
-    const p=DB.data.pagos.find(x=>x.folio===folio);const e=ESTATUS[p.estatus];
+    const p=DB.data.pagos.find(x=>x.folio===folio);const e=ESTATUS[p.estatus]||ESTATUS.pendiente;
     const gps=p.lat?`<a href="https://maps.google.com/?q=${p.lat},${p.lng}" target="_blank">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</a>`:'—';
     this.modal('Detalle del pago',`
-      <div class="kv"><span>Folio</span><b style="font-family:monospace">${p.folio}</b></div>
+      ${p.alerta?`<div style="background:var(--ambar-soft);color:#7a520d;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13.5px"><b>⚠ Revisar:</b> ${U.esc(p.alerta)}</div>`:''}
+      <div class="kv"><span>Recibo</span><b style="font-family:monospace">${p.recibo?U.esc(p.recibo)+' · '+(SERIES[p.serie]?SERIES[p.serie].nombre:''):'—'}</b></div>
+      ${p.tipo==='cancelado'?`<div class="kv"><span>Tipo</span><b><span class="pill rech">Recibo cancelado</span></b></div><div class="kv"><span>Motivo</span><b>${U.esc(p.motivoCancelacion||'—')}</b></div>`:''}
+      <div class="kv"><span>Folio interno</span><b style="font-family:monospace;font-size:12.5px">${p.folio}</b></div>
       <div class="kv"><span>Estatus</span><b><span class="pill ${e.cls} dot">${e.txt}</span></b></div>
+      ${p.importadoAccess?`<div class="kv"><span>En Access</span><b>${U.esc(p.importadoAccess)}</b></div>`:''}
       <div class="kv"><span>Cliente</span><b>${p.clienteNombre}</b></div>
       <div class="kv"><span>Póliza</span><b>${p.poliza}</b></div>
       <div class="kv"><span>Importe</span><b>${U.money(p.importe)}</b></div>
@@ -921,7 +935,7 @@ const Admin = {
       <div class="kv"><span>Ubicación GPS</span><b>${gps}</b></div>
       <div class="kv"><span>Observaciones</span><b>${p.observaciones||'—'}</b></div>
       <div class="kv"><span>Firma</span><b>${p.firma?`<img src="${p.firma}" style="height:46px">`:(Net.conectado()?`<span id="firmaSlot" data-folio="${p.folio}"><button class="btn ghost tiny" onclick="Admin.verFirma('${p.folio}')">Ver firma</button></span>`:'No registrada')}</b></div>
-      ${this.esCajaOAdmin()&&(p.estatus==='pendiente'||p.estatus==='sincronizado')?
+      ${this.esCajaOAdmin()&&this.porValidar(p)?
         `<div class="row" style="margin-top:16px">
           <button class="btn green" onclick="Admin.validar('${p.folio}',true)">✓ Validar pago</button>
           <button class="btn ghost" style="color:var(--rojo);border-color:#f0caca" onclick="Admin.rechazar('${p.folio}')">Rechazar</button>
@@ -935,6 +949,7 @@ const Admin = {
   },
   validar(folio,cerrar){
     const p=DB.data.pagos.find(x=>x.folio===folio);
+    if(p.estatus==='conflicto' && !confirm('Este pago tiene una alerta:\n\n'+(p.alerta||'')+'\n\n¿Lo revisaste contra el recibo físico y quieres validarlo?')) return;
     p.estatus='validado';p.validadoPor=this.user.nombre;p.validadoEn=new Date().toISOString();
     DB.save();
     Net.post({action:'validarPago',folio,estatus:'validado',validadoPor:this.user.nombre});
@@ -952,6 +967,8 @@ const Admin = {
   /* ============ COBRADORES ============ */
   renderCobradores(){
     this.head('Cobradores','Desempeño y seguimiento operativo');
+    const esAdmin=this.user.rol==='admin';
+    if(esAdmin) document.getElementById('pageActions').innerHTML=`<button class="btn sm" onclick="Admin.nuevoCobrador()">＋ Nuevo cobrador</button>`;
     const cobs=DB.data.usuarios.filter(u=>u.rol==='cobrador');
     const rows=cobs.map(c=>{
       const ps=DB.data.pagos.filter(p=>p.cobradorId===c.id&&p.estatus!=='rechazado');
@@ -964,7 +981,7 @@ const Admin = {
     });
     document.getElementById('view').innerHTML=`
       <div class="card tablewrap"><table><thead><tr>
-        <th>Cobrador</th><th>Prefijo</th><th class="num">Cobrado hoy</th><th class="num">Total cobrado</th><th class="num">Por validar</th><th class="num">Efectividad</th><th>Último pago</th>
+        <th>Cobrador</th><th>Prefijo</th><th class="num">Cobrado hoy</th><th class="num">Total cobrado</th><th class="num">Por validar</th><th class="num">Efectividad</th><th>Último pago</th>${esAdmin?'<th></th>':''}
       </tr></thead><tbody>
       ${rows.map(r=>`<tr>
         <td><div style="display:flex;align-items:center;gap:10px"><div style="width:34px;height:34px;border-radius:9px;background:var(--azul-soft);color:var(--azul);display:grid;place-items:center;font-weight:700;font-size:13px">${U.ini(r.c.nombre)}</div>${r.c.nombre}</div></td>
@@ -973,9 +990,284 @@ const Admin = {
         <td class="num"><b>${U.money(r.monto)}</b></td>
         <td class="num">${r.pend?`<span class="pill pend">${r.pend}</span>`:'0'}</td>
         <td class="num"><span class="pill ${r.efe>=70?'ok':'pend'}">${r.efe}%</span></td>
-        <td style="white-space:nowrap">${r.ult}</td>
-      </tr>`).join('')}
+        <td style="white-space:nowrap">${r.ult}${r.c.activo===false||r.c.activo==='false'?' <span class="pill rech">Baja</span>':''}</td>
+        ${esAdmin?`<td style="white-space:nowrap;text-align:right">
+          <button class="btn ghost tiny" onclick="Admin.cambiarPIN('${r.c.id}')">PIN</button>
+          <button class="btn ghost tiny" onclick="Admin.toggleUser('${r.c.id}')">${r.c.activo===false||r.c.activo==='false'?'Alta':'Baja'}</button></td>`:''}
+      </tr>`).join('')||'<tr><td colspan="8"><div class="empty">Aún no hay cobradores. Da de alta el primero con “＋ Nuevo cobrador”.</div></td></tr>'}
       </tbody></table></div>`;
+  },
+
+  /* ============ HELPERS DE RECIBOS ============ */
+  porValidar(p){return p.estatus==='pendiente'||p.estatus==='sincronizado'||p.estatus==='conflicto';},
+  /* "J15001" → {serie:'J',num:15001} · "88740" → {serie:'MA',num:88740} */
+  parseRecibo(r){const m=String(r||'').trim().toUpperCase().match(/^(J)?\s*(\d+)$/);return m?{serie:m[1]?'J':'MA',num:Number(m[2])}:null;},
+  fmtRec(serie,num){return (SERIES[serie]?SERIES[serie].pref:'')+num;},
+  reciboCelda(p){
+    if(!p.recibo) return `<span style="color:var(--muted)">${p.folio}</span>`;
+    return U.esc(p.recibo)+(p.tipo==='cancelado'?' <span class="pill rech" style="margin-left:4px">Cancelado</span>':'')
+      +(p.alerta?' <span title="'+U.esc(p.alerta)+'" style="cursor:help">⚠</span>':'');
+  },
+  fcD(d){return d?U.fc(String(d).slice(0,10)+'T12:00'):'—';},
+  esActivo(u){return !(u.activo===false||u.activo==='false');},
+  puedeAsignar(){return ['admin','supervisor','caja'].includes(this.user.rol);},
+  /* Uso de cada folio de un block: {num: pago} */
+  usosBlock(b){
+    const map={};
+    DB.data.pagos.forEach(p=>{
+      if(p.estatus==='rechazado') return;
+      const r=this.parseRecibo(p.recibo);
+      if(r&&r.serie===b.serie&&r.num>=Number(b.folioIni)&&r.num<=Number(b.folioFin)) map[r.num]=p;
+    });
+    return map;
+  },
+  resumenBlock(b){
+    const usos=this.usosBlock(b);const total=Number(b.folioFin)-Number(b.folioIni)+1;
+    let usados=0,cancelados=0,revisar=0;
+    Object.values(usos).forEach(p=>{if(p.tipo==='cancelado')cancelados++;else usados++;if(p.estatus==='conflicto')revisar++;});
+    return {usos,total,usados,cancelados,revisar,disponibles:total-usados-cancelados};
+  },
+  siguienteFolio(serie){
+    const fines=DB.data.bloques.filter(b=>b.serie===serie).map(b=>Number(b.folioFin));
+    return fines.length?Math.max(...fines)+1:'';
+  },
+  traslape(serie,ini,fin){
+    return DB.data.bloques.find(b=>b.serie===serie&&!(fin<Number(b.folioIni)||ini>Number(b.folioFin)));
+  },
+
+  /* ============ DOTACIÓN DE RECIBOS ============ */
+  renderRecibos(){
+    this.head('Dotación de recibos','Blocks de recibos físicos entregados a cada cobrador');
+    if(this.puedeAsignar()) document.getElementById('pageActions').innerHTML=`<button class="btn sm" onclick="Admin.asignarBlockModal()">＋ Asignar block</button>`;
+    this._recF=this._recF||{estado:'activo',cobrador:'todos'};
+    const f=this._recF;
+    const cobs=DB.data.usuarios.filter(u=>u.rol==='cobrador'&&this.esActivo(u));
+    const bloques=DB.data.bloques.map(b=>({b,r:this.resumenBlock(b)}));
+
+    /* Tarjetas por cobrador: recibos disponibles por serie */
+    const tarjetas=cobs.map(c=>{
+      const mios=bloques.filter(x=>x.b.cobradorId===c.id&&x.b.estatus!=='cerrado');
+      const disp=s=>mios.filter(x=>x.b.serie===s).reduce((a,x)=>a+x.r.disponibles,0);
+      const ma=disp('MA'), j=disp('J');
+      const linea=(nom,n)=>`<div class="kv" style="padding:6px 0"><span>${nom}</span><b style="color:${n===0?'var(--rojo)':n<10?'#8a5d0f':'inherit'}">${n} disponibles</b></div>`;
+      return `<div class="card pad" style="padding:14px 16px">
+        <div style="font-weight:700;margin-bottom:4px">${U.esc(c.nombre)} <span style="font-family:monospace;color:var(--muted);font-weight:400;font-size:12px">${c.prefijo}</span></div>
+        ${linea('Mutuclub / Arca',ma)}${linea('Juda',j)}
+        ${(ma<10||j<10)?`<div style="font-size:12px;color:#8a5d0f;margin-top:6px">Conviene entregarle otro block.</div>`:''}
+      </div>`;
+    }).join('');
+
+    const lista=bloques.filter(x=>{
+      if(f.estado==='activo'&&x.b.estatus==='cerrado')return false;
+      if(f.estado==='cerrado'&&x.b.estatus!=='cerrado')return false;
+      if(f.cobrador!=='todos'&&x.b.cobradorId!==f.cobrador)return false;
+      return true;
+    }).sort((a,b)=>a.b.serie.localeCompare(b.b.serie)||Number(a.b.folioIni)-Number(b.b.folioIni));
+
+    const estadoPill=x=>x.b.estatus==='cerrado'?'<span class="pill sync">Cerrado</span>'
+      :x.r.disponibles===0?'<span class="pill pend">Por cerrar</span>':'<span class="pill ok">En uso</span>';
+    const barra=x=>{const pu=x.r.usados/x.r.total*100,pc=x.r.cancelados/x.r.total*100;
+      return `<div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line);min-width:90px">
+        <div style="width:${pu}%;background:var(--verde)"></div><div style="width:${pc}%;background:var(--rojo)"></div></div>`;};
+
+    document.getElementById('view').innerHTML=`
+      ${cobs.length?`<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-bottom:18px">${tarjetas}</div>`
+        :`<div class="card pad" style="margin-bottom:18px;color:var(--muted)">No hay cobradores activos. Dalos de alta en la sección Cobradores.</div>`}
+      <div class="toolbar">
+        <div class="seg">${[['activo','Activos'],['cerrado','Cerrados'],['todos','Todos']].map(([k,t])=>`<button class="${f.estado===k?'on':''}" onclick="Admin._recF.estado='${k}';Admin.renderRecibos()">${t}</button>`).join('')}</div>
+        <select onchange="Admin._recF.cobrador=this.value;Admin.renderRecibos()">
+          <option value="todos">Todos los cobradores</option>
+          ${DB.data.usuarios.filter(u=>u.rol==='cobrador').map(c=>`<option value="${c.id}" ${f.cobrador===c.id?'selected':''}>${U.esc(c.nombre)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="card tablewrap"><table><thead><tr>
+        <th>Serie</th><th>Folios</th><th>Cobrador</th><th>Entregado</th><th class="num">Usados</th><th class="num">Cancelados</th><th class="num">Disponibles</th><th>Avance</th><th>Estado</th><th></th>
+      </tr></thead><tbody>
+      ${lista.length?lista.map(x=>`<tr>
+        <td>${SERIES[x.b.serie]?SERIES[x.b.serie].nombre:x.b.serie}</td>
+        <td style="font-family:monospace;white-space:nowrap">${this.fmtRec(x.b.serie,x.b.folioIni)} – ${this.fmtRec(x.b.serie,x.b.folioFin)}</td>
+        <td>${U.esc(x.b.cobradorNombre)}</td>
+        <td style="white-space:nowrap">${this.fcD(x.b.entregadoEn)}</td>
+        <td class="num">${x.r.usados}</td>
+        <td class="num">${x.r.cancelados}</td>
+        <td class="num"><b>${x.r.disponibles}</b></td>
+        <td>${barra(x)}</td>
+        <td>${estadoPill(x)}${x.r.revisar?` <span class="pill pend" title="Recibos con alerta">⚠ ${x.r.revisar}</span>`:''}</td>
+        <td style="text-align:right"><button class="btn ghost tiny" onclick="Admin.verBlock('${x.b.id}')">Ver</button></td>
+      </tr>`).join(''):`<tr><td colspan="10"><div class="empty">${DB.data.bloques.length?'No hay blocks con estos filtros.':'Aún no se ha asignado ningún block. Usa “＋ Asignar block”.'}</div></td></tr>`}
+      </tbody></table></div>
+      <div style="margin-top:10px;color:var(--muted);font-size:13px">${lista.length} block(s)</div>`;
+  },
+
+  asignarBlockModal(){
+    const cobs=DB.data.usuarios.filter(u=>u.rol==='cobrador'&&this.esActivo(u));
+    if(!cobs.length){this.toast('Primero da de alta un cobrador');return;}
+    this.modal('Asignar block de recibos',`
+      <div class="field"><label>Cobrador</label><select id="bk_cob">${cobs.map(c=>`<option value="${c.id}">${U.esc(c.nombre)} (${c.prefijo})</option>`).join('')}</select></div>
+      <div class="field"><label>Serie</label><select id="bk_serie" onchange="Admin.bkSugerir()">
+        <option value="MA">Mutuclub / Arca</option><option value="J">Juda (se registran con J)</option></select></div>
+      <div class="row">
+        <div class="field"><label>Folio inicial</label><input id="bk_ini" type="number" inputmode="numeric" oninput="Admin.bkFinAuto()"></div>
+        <div class="field"><label>Folio final</label><input id="bk_fin" type="number" inputmode="numeric" oninput="Admin.bkRevisar()"></div>
+      </div>
+      <div class="field"><label>Fecha de entrega</label><input id="bk_fecha" type="date" value="${U.hoyISO()}"></div>
+      <div class="field"><label>Notas <span style="font-weight:400">(opcional)</span></label><input id="bk_notas" placeholder="Ej. block 12 de Juda"></div>
+      <div id="bk_msg" style="font-size:13px;min-height:20px;margin:-4px 0 12px"></div>
+      <button class="btn" id="bk_btn" style="width:100%" onclick="Admin.guardarBlock()">Asignar</button>`);
+    this.bkSugerir();
+  },
+  bkSugerir(){
+    const s=document.getElementById('bk_serie').value;const sig=this.siguienteFolio(s);
+    document.getElementById('bk_ini').value=sig;this.bkFinAuto();
+  },
+  bkFinAuto(){
+    const ini=Number(document.getElementById('bk_ini').value);
+    document.getElementById('bk_fin').value=ini>0?ini+49:'';this.bkRevisar();
+  },
+  bkRevisar(){
+    const s=document.getElementById('bk_serie').value;
+    const ini=Number(document.getElementById('bk_ini').value),fin=Number(document.getElementById('bk_fin').value);
+    const msg=document.getElementById('bk_msg'),btn=document.getElementById('bk_btn');
+    let err='',info='';
+    if(!(ini>0)||!(fin>0)) err='Captura el folio inicial y final.';
+    else if(fin<ini) err='El folio final no puede ser menor al inicial.';
+    else if(fin-ini+1>500) err='Máximo 500 folios por registro.';
+    else{
+      const t=this.traslape(s,ini,fin);
+      if(t) err=`Se traslapa con ${this.fmtRec(s,t.folioIni)}–${this.fmtRec(s,t.folioFin)} de ${t.cobradorNombre}.`;
+      else info=`${fin-ini+1} recibos: ${this.fmtRec(s,ini)} al ${this.fmtRec(s,fin)}`;
+    }
+    msg.innerHTML=err?`<span style="color:var(--rojo)">${err}</span>`:`<span style="color:var(--muted)">${info}</span>`;
+    btn.disabled=!!err;
+  },
+  async guardarBlock(){
+    const p={cobradorId:document.getElementById('bk_cob').value,serie:document.getElementById('bk_serie').value,
+      folioIni:Number(document.getElementById('bk_ini').value),folioFin:Number(document.getElementById('bk_fin').value),
+      entregadoEn:document.getElementById('bk_fecha').value,notas:document.getElementById('bk_notas').value.trim(),usuario:this.user.nombre};
+    const btn=document.getElementById('bk_btn');btn.disabled=true;btn.textContent='Guardando…';
+    let res;
+    if(Net.conectado()){
+      try{res=await Net.get('asignarBlock',p);}catch(e){res={ok:false,error:'Sin conexión con el servidor. Intenta de nuevo.'};}
+    }else{
+      const t=this.traslape(p.serie,p.folioIni,p.folioFin);
+      const c=DB.data.usuarios.find(u=>u.id===p.cobradorId);
+      res=t?{ok:false,error:'Se traslapa con otro block'}:{ok:true,bloque:{id:'b'+Date.now().toString(36),...p,cobradorNombre:c.nombre,entregadoPor:p.usuario,estatus:'activo'}};
+    }
+    if(!res||!res.ok){
+      document.getElementById('bk_msg').innerHTML=`<span style="color:var(--rojo)">${U.esc((res&&res.error)||'Error')}</span>`;
+      btn.disabled=false;btn.textContent='Asignar';return;
+    }
+    DB.data.bloques.push(res.bloque);DB.save();
+    this.bitacora(`Asignó block ${this.fmtRec(p.serie,p.folioIni)}–${this.fmtRec(p.serie,p.folioFin)} a ${res.bloque.cobradorNombre}`);
+    this.closeModal();this.toast('Block asignado');this.renderRecibos();
+  },
+
+  verBlock(id){
+    const b=DB.data.bloques.find(x=>x.id===id);if(!b)return;
+    const r=this.resumenBlock(b);const esAdmin=this.user.rol==='admin';
+    let celdas='';
+    for(let n=Number(b.folioIni);n<=Number(b.folioFin);n++){
+      const p=r.usos[n];
+      const st=!p?['#fff','var(--muted)','Disponible']:p.estatus==='conflicto'?['var(--ambar-soft)','#8a5d0f','Revisar']
+        :p.tipo==='cancelado'?['var(--rojo-soft)','#8c2a2a','Cancelado']:['var(--verde-soft)','#10684c','Usado'];
+      const tip=p?`${this.fmtRec(b.serie,n)} · ${st[2]} · ${p.clienteNombre||''} ${p.tipo==='cancelado'?'':U.money(p.importe)}`:`${this.fmtRec(b.serie,n)} · Disponible`;
+      celdas+=`<div title="${U.esc(tip)}" ${p?`onclick="Admin.closeModal();Admin.verPago('${p.folio}')"`:''}
+        style="background:${st[0]};color:${st[1]};border:1px solid var(--line);border-radius:6px;font-size:11px;font-family:monospace;
+        text-align:center;padding:5px 0;${p?'cursor:pointer;font-weight:700':''}">${String(n).slice(-3)}</div>`;
+    }
+    const leyenda=(c,t)=>`<span style="display:inline-flex;align-items:center;gap:5px;margin-right:12px"><span style="width:11px;height:11px;border-radius:3px;background:${c};border:1px solid var(--line)"></span>${t}</span>`;
+    this.modal(`Block ${this.fmtRec(b.serie,b.folioIni)} – ${this.fmtRec(b.serie,b.folioFin)}`,`
+      <div class="kv"><span>Serie</span><b>${SERIES[b.serie]?SERIES[b.serie].nombre:b.serie}</b></div>
+      <div class="kv"><span>Cobrador</span><b>${U.esc(b.cobradorNombre)}</b></div>
+      <div class="kv"><span>Entregado</span><b>${this.fcD(b.entregadoEn)}${b.entregadoPor?' · '+U.esc(b.entregadoPor):''}</b></div>
+      ${b.notas?`<div class="kv"><span>Notas</span><b>${U.esc(b.notas)}</b></div>`:''}
+      ${b.estatus==='cerrado'?`<div class="kv"><span>Cerrado</span><b>${this.fcD(b.cerradoEn)}${b.cerradoPor?' · '+U.esc(b.cerradoPor):''}</b></div>`:''}
+      <div class="kv"><span>Usados / cancelados / disponibles</span><b>${r.usados} / ${r.cancelados} / ${r.disponibles}</b></div>
+      <div style="font-size:12px;color:var(--muted);margin:14px 0 8px">${leyenda('var(--verde-soft)','Usado')}${leyenda('var(--rojo-soft)','Cancelado')}${leyenda('var(--ambar-soft)','Revisar')}${leyenda('#fff','Disponible')}</div>
+      <div style="display:grid;grid-template-columns:repeat(10,1fr);gap:4px">${celdas}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:6px">Se muestran los últimos 3 dígitos. Toca un folio usado para ver el pago.</div>
+      <div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap">
+        ${b.estatus!=='cerrado'&&this.puedeAsignar()?`<button class="btn" style="flex:1" onclick="Admin.cerrarBlock('${b.id}',${r.disponibles})">Cerrar block</button>`:''}
+        ${b.estatus==='cerrado'&&esAdmin?`<button class="btn ghost" style="flex:1" onclick="Admin.blockAccion('reabrirBlock','${b.id}')">Reabrir</button>`:''}
+        ${esAdmin&&r.usados+r.cancelados===0?`<button class="btn ghost" style="flex:1;color:var(--rojo);border-color:#f0caca" onclick="Admin.blockAccion('eliminarBlock','${b.id}')">Eliminar</button>`:''}
+      </div>`);
+  },
+  cerrarBlock(id,disponibles){
+    const txt=disponibles>0
+      ?`Este block todavía tiene ${disponibles} recibo(s) sin registrar.\n\nSi el cobrador ya entregó todo, primero deben registrarse como pagos o cancelados.\n\n¿Cerrarlo de todos modos?`
+      :'¿Cerrar el block? Confirma que ya recibiste los originales y copias en oficina.';
+    if(!confirm(txt))return;
+    this.blockAccion('cerrarBlock',id);
+  },
+  async blockAccion(action,id){
+    if(action==='eliminarBlock'&&!confirm('¿Eliminar este block? Úsalo solo si se capturó por error.'))return;
+    let res={ok:true};
+    if(Net.conectado()){try{res=await Net.get(action,{id,usuario:this.user.nombre});}catch(e){res={ok:false,error:'Sin conexión con el servidor'};}}
+    if(!res||!res.ok){this.toast((res&&res.error)||'Error');return;}
+    const i=DB.data.bloques.findIndex(x=>x.id===id);
+    if(action==='eliminarBlock') DB.data.bloques.splice(i,1);
+    else if(action==='cerrarBlock') Object.assign(DB.data.bloques[i],{estatus:'cerrado',cerradoEn:U.hoyISO(),cerradoPor:this.user.nombre});
+    else Object.assign(DB.data.bloques[i],{estatus:'activo',cerradoEn:'',cerradoPor:''});
+    DB.save();this.bitacora({cerrarBlock:'Cerró',reabrirBlock:'Reabrió',eliminarBlock:'Eliminó'}[action]+' block '+id);
+    this.closeModal();this.toast({cerrarBlock:'Block cerrado',reabrirBlock:'Block reabierto',eliminarBlock:'Block eliminado'}[action]);this.renderRecibos();
+  },
+
+  /* ============ ALTA DE COBRADORES / PIN ============ */
+  nuevoCobrador(){
+    this.modal('Nuevo cobrador',`
+      <div class="field"><label>Nombre completo</label><input id="nc_nombre" placeholder="Ej. Juan Pérez López"></div>
+      <div class="field"><label>Usuario para entrar a la app</label><input id="nc_usuario" autocapitalize="none" placeholder="Ej. juanp"></div>
+      <div class="field"><label>PIN (4 a 6 números)</label><input id="nc_pin" type="password" inputmode="numeric" maxlength="6"></div>
+      <div id="nc_msg" style="color:var(--rojo);font-size:13px;min-height:18px;margin-bottom:10px"></div>
+      <button class="btn" id="nc_btn" style="width:100%" onclick="Admin.guardarCobrador()">Dar de alta</button>`);
+  },
+  async guardarCobrador(){
+    const nombre=document.getElementById('nc_nombre').value.trim();
+    const usuario=document.getElementById('nc_usuario').value.trim().toLowerCase();
+    const pin=document.getElementById('nc_pin').value.trim();
+    const msg=document.getElementById('nc_msg');
+    if(!nombre||!usuario){msg.textContent='Captura nombre y usuario.';return;}
+    if(!/^[a-z0-9._-]{3,}$/.test(usuario)){msg.textContent='Usuario: mínimo 3 caracteres, sin espacios ni acentos.';return;}
+    if(!/^\d{4,6}$/.test(pin)){msg.textContent='El PIN debe tener de 4 a 6 números.';return;}
+    if(DB.data.usuarios.some(u=>String(u.usuario).toLowerCase()===usuario)){msg.textContent='Ese usuario ya existe.';return;}
+    const btn=document.getElementById('nc_btn');btn.disabled=true;btn.textContent='Guardando…';
+    const hash=await U.sha256(pin);
+    let res;
+    if(Net.conectado()){
+      try{res=await Net.get('guardarUsuario',{nombre,usuario,hash,rol:'cobrador',quien:this.user.nombre});}catch(e){res={ok:false,error:'Sin conexión con el servidor'};}
+    }else{
+      const n=DB.data.usuarios.filter(u=>u.rol==='cobrador').length+1;
+      res={ok:true,usuario:{id:'u'+Date.now().toString(36),usuario,rol:'cobrador',nombre,prefijo:'C'+String(n).padStart(2,'0'),activo:true,hash}};
+    }
+    if(!res||!res.ok){msg.textContent=(res&&res.error)||'Error';btn.disabled=false;btn.textContent='Dar de alta';return;}
+    DB.data.usuarios.push(res.usuario);DB.save();this.bitacora('Alta de cobrador '+usuario);
+    this.closeModal();this.toast('Cobrador dado de alta');this.renderCobradores();
+  },
+  cambiarPIN(id){
+    const u=DB.data.usuarios.find(x=>x.id===id);
+    this.modal('Cambiar PIN',`
+      <div style="margin-bottom:12px"><b>${U.esc(u.nombre)}</b> <span style="color:var(--muted)">· ${U.esc(u.usuario)}</span></div>
+      <div class="field"><label>PIN nuevo (4 a 6 números)</label><input id="cp_pin" type="password" inputmode="numeric" maxlength="6"></div>
+      <div id="cp_msg" style="color:var(--rojo);font-size:13px;min-height:18px;margin-bottom:10px"></div>
+      <button class="btn" style="width:100%" onclick="Admin.guardarPIN('${id}')">Guardar PIN</button>`);
+  },
+  async guardarPIN(id){
+    const pin=document.getElementById('cp_pin').value.trim();
+    if(!/^\d{4,6}$/.test(pin)){document.getElementById('cp_msg').textContent='El PIN debe tener de 4 a 6 números.';return;}
+    const hash=await U.sha256(pin);let res={ok:true};
+    if(Net.conectado()){try{res=await Net.get('guardarUsuario',{id,hash,quien:this.user.nombre});}catch(e){res={ok:false,error:'Sin conexión con el servidor'};}}
+    if(!res||!res.ok){document.getElementById('cp_msg').textContent=(res&&res.error)||'Error';return;}
+    DB.data.usuarios.find(x=>x.id===id).hash=hash;DB.save();this.bitacora('Cambió PIN de '+id);
+    this.closeModal();this.toast('PIN actualizado');
+  },
+
+  /* Respaldo manual: validados que aún no pasan a Access, con columnas de BD Pagos */
+  exportAccess(){
+    const rows=DB.data.pagos.filter(p=>p.estatus==='validado'&&p.recibo&&!p.importadoAccess).map(p=>[
+      p.idCliente||'',p.idPoliza||p.poliza,String(p.fecha).slice(0,10),p.tipo==='cancelado'?0:p.importe,p.recibo,
+      (p.tipo==='cancelado'?'CANCELADO · CAMPO · ':'CAMPO · ')+p.cobradorNombre+(p.motivoCancelacion?' · '+p.motivoCancelacion:'')]);
+    if(!rows.length){this.toast('No hay pagos validados pendientes de pasar a Access');return;}
+    this._csv('Pagos_campo_para_Access',['IdCliente','IdPoliza','Fecha Pago','Monto de Pago','Número de Recibo','Notas'],rows);
   },
 
   /* ============ CLIENTES ============ */
@@ -1130,7 +1422,10 @@ const Admin = {
     if(window.innerWidth<820)document.querySelector('#view .grid').style.gridTemplateColumns='1fr';
   },
   saveEmpresa(){['nombre','direccion','tels','rfc','mensaje','aviso'].forEach(k=>DB.data.empresa[k]=document.getElementById('cf_'+k).value);DB.save();this.bitacora('Actualizó datos de empresa');this.toast('Datos guardados');},
-  toggleUser(id){const u=DB.data.usuarios.find(x=>x.id===id);if(u.id===this.user.id){this.toast('No puedes darte de baja a ti mismo');return;}u.activo=!u.activo;DB.save();this.bitacora((u.activo?'Alta':'Baja')+' usuario '+u.usuario);this.renderConfig();},
+  toggleUser(id){const u=DB.data.usuarios.find(x=>x.id===id);if(u.id===this.user.id){this.toast('No puedes darte de baja a ti mismo');return;}
+    const activo=!(u.activo===true||u.activo==='true');u.activo=activo;DB.save();this.bitacora((activo?'Alta':'Baja')+' usuario '+u.usuario);
+    if(Net.conectado()) Net.get('guardarUsuario',{id:u.id,activo,quien:this.user.nombre}).then(r=>{if(!r||!r.ok)this.toast('No se guardó en el servidor: '+((r&&r.error)||'sin respuesta'));}).catch(()=>this.toast('Sin conexión con el servidor'));
+    this.go(this.section);},
   showBitacora(){
     const items=DB.data.bitacora.slice(0,60).map(b=>`<div class="kv"><span>${U.esc(b.accion)}<br><small style="opacity:.7">${b.usuario}</small></span><b style="font-size:12px;color:var(--muted)">${U.fh(b.fecha)}</b></div>`).join('')||'<div class="empty">Sin registros.</div>';
     this.modal('Bitácora',`<div style="max-height:60vh;overflow:auto">${items}</div>`);
